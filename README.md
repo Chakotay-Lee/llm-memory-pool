@@ -106,30 +106,31 @@ The **main thread** handles the live conversation. The **memory thread** asynchr
 
 ## Why This Works: KV Cache Preservation
 
-Modern LLM inference engines (vLLM, TensorRT-LLM, Gemini's internal caching) cache the key-value attention states of the **prefix** of each prompt. If the prefix is identical between two consecutive turns, the engine reuses the cached states and skips recomputation — dramatically reducing latency and cost.
+Modern LLM inference engines (vLLM, TensorRT-LLM, Gemini's internal caching) cache the key-value attention states of the **prefix** of each prompt. If the prefix is identical between consecutive turns, the engine reuses the cached states and skips recomputation — reducing latency and cost.
 
 The standard mistake is putting dynamic memory into the system prompt:
 
 ```
-# BAD — system prompt changes every turn → KV cache misses every time
-System: You are a helpful assistant.
-        MEMORY: User's name is Alex. User is building a memory system.  ← changes
-User: What did we discuss?
+# BAD — system prompt changes every turn → cache miss from position 0 every time
+Turn N:   [system + memory_N]  [msg1][rpl1] ... [msgN]
+Turn N+1: [system + memory_N+1][msg1][rpl1] ... [msgN][rplN][msgN+1]
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+           changed → entire prefix invalid → full recompute
 ```
 
-This implementation keeps the system prompt **completely static**:
+This implementation keeps the system prompt **completely static**. Memory is prepended only to the **current user message**:
 
 ```
-# GOOD — stable prefix → KV cache hits on every turn
-System: You are a helpful assistant.        ← never changes
-...history turns...
-User: ## Conversation Memory               ← memory goes HERE
-      [User Profile] Name is Alex, building LLM memory system.
-      ---
-      What did we discuss?
+# GOOD — system prompt never changes → its cache is always valid
+Turn N:   [system]  [msg1][rpl1]...[msgN-1][rplN-1]  [memory_N + msgN]
+Turn N+1: [system]  [msg1][rpl1]...[msgN-1][rplN-1]  [memory_N + msgN][rplN]  [memory_N+1 + msgN+1]
+           ^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+           cached   cached from Turn N                                          only this is new
 ```
 
-Memory is prepended only to the **current user message**. The system prompt and all prior history turns remain identical to the previous turn — maximizing prefix cache reuse.
+The conversation history grows by two entries each turn (one user, one assistant). Only those two new entries require computation — everything before them is already cached. The system prompt cache is never invalidated.
+
+Contrast this with injecting memory into the system prompt: every turn changes the system prompt, which invalidates the entire prefix cache and forces a full recompute from position 0.
 
 ---
 
