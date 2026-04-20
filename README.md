@@ -75,12 +75,29 @@ None of these are designed for the specific characteristics of **conversational 
 
 Run two threads simultaneously:
 
-```
-User ──► [Main Thread]  ──────────────────────────────► LLM  ──► Response
-              │                                           ▲
-              │ (every turn)                              │
-              ▼                                           │
-         [Memory Thread]  compress → pool → retrieve ────┘
+```mermaid
+flowchart TB
+    U([User Message])
+
+    subgraph main["① Main Thread — synchronous"]
+        RET["retrieve from pool"]
+        BUILD["system prompt · history · ❰memory❱ + user"]
+        LLM(["LLM"])
+        OUT([Response])
+        RET --> BUILD --> LLM --> OUT
+    end
+
+    subgraph async["② Memory Thread — async, non-blocking"]
+        BUF["accumulate turns"]
+        S1["Step 1 · strategy + keywords"]
+        S2["Step 2 · extract entries"]
+        POOL[("Memory Pool · ARC eviction")]
+        BUF --> S1 --> S2 --> POOL
+    end
+
+    U --> RET
+    LLM -- add_turn --> BUF
+    POOL -- "retrieve (keyword / semantic)" --> RET
 ```
 
 The **main thread** handles the live conversation. The **memory thread** asynchronously compresses older turns into a keyword-indexed pool, then injects relevant memories into the next user message — without ever modifying the system prompt.
