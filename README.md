@@ -300,6 +300,165 @@ bun run demo    # web UI at :3001
 
 ---
 
+## Python Usage Guide
+
+### Quick start
+
+```bash
+cd python
+cp .env.example .env     # add GEMINI_API_KEY=your_key_here
+pip install -r requirements.txt
+python examples/basic_chat.py    # terminal chat with memory
+python server.py                 # web UI at http://localhost:8000
+```
+
+---
+
+### Use as a library in your own project
+
+```python
+import asyncio
+from memory_pool import MemoryAgent
+
+agent = MemoryAgent(api_key="your_key_here")
+
+async def main():
+    async for chunk in agent.chat_stream("Hello, my name is Alex"):
+        print(chunk, end="", flush=True)
+
+asyncio.run(main())
+```
+
+---
+
+### Configuration options
+
+All options are optional — sensible defaults are set for every field.
+
+```python
+from memory_pool import MemoryAgent
+
+agent = MemoryAgent(
+    # LLM endpoints
+    api_key      = "your_key_here",
+    base_url     = "https://generativelanguage.googleapis.com/v1beta/openai",
+    main_model   = "gemma-4-31b-it",        # model for chat responses
+    memory_model = "gemma-4-26b-a4b-it",    # smaller model for compression
+
+    # Context window management
+    max_raw_turns        = 4,   # turns kept in live context (keep small to exercise memory)
+    min_turns_to_compress = 2,  # turns batched before compression fires (must be < max_raw_turns)
+
+    # Memory pool
+    max_pool_entries = 100,   # eviction kicks in when pool is full
+    inject_budget    = 800,   # max characters of memory injected per turn
+
+    # Persistence — pool survives process restarts
+    pool_file = "./pool.json",
+
+    # Event hook — called for every internal event
+    on_event  = lambda kind, data: print(f"[{kind}] {data}"),
+)
+
+await agent.load_pool()   # restore pool from pool_file if it exists
+```
+
+---
+
+### Using a different LLM provider
+
+Any OpenAI-compatible endpoint works. Change `base_url` and models:
+
+```python
+# OpenAI
+agent = MemoryAgent(
+    base_url     = "https://api.openai.com/v1",
+    main_model   = "gpt-4o",
+    memory_model = "gpt-4o-mini",
+    api_key      = "sk-...",
+)
+
+# Ollama (local)
+agent = MemoryAgent(
+    base_url     = "http://localhost:11434/v1",
+    main_model   = "llama3.1:8b",
+    memory_model = "llama3.2:3b",
+    api_key      = "ollama",
+)
+```
+
+> **Note:** If your provider is behind a Cloudflare WAF that blocks the OpenAI SDK's default `User-Agent`, pass a custom `http_client`:
+> ```python
+> import httpx
+> from openai import AsyncOpenAI
+> from memory_pool.pool import MemoryPool
+> from memory_pool.worker import MemoryWorker
+>
+> client = AsyncOpenAI(
+>     base_url = "https://your-provider/v1",
+>     api_key  = "your_key",
+>     http_client = httpx.AsyncClient(headers={"User-Agent": "python-httpx/0.27.0"}),
+> )
+> ```
+
+---
+
+### Low-level API: `MemoryWorker` directly
+
+Use `MemoryWorker` and `MemoryPool` directly when you already have your own chat loop and just want to bolt on memory:
+
+```python
+import asyncio
+from openai import AsyncOpenAI
+from memory_pool.pool import MemoryPool
+from memory_pool.worker import MemoryWorker
+from memory_pool.types import Turn
+
+client = AsyncOpenAI(api_key="...", base_url="...")
+pool   = MemoryPool(max_entries=100)
+worker = MemoryWorker(
+    pool=pool,
+    client=client,
+    memory_model="gemma-4-26b-a4b-it",
+    min_turns_to_compress=2,
+    on_event=lambda kind, data: print(f"[{kind}]", data),
+)
+
+async def my_chat_loop():
+    for i, (user_msg, ai_reply) in enumerate(my_turns):
+        # Retrieve relevant memories before each turn
+        memories = await worker.get_memory(user_msg, budget=800)
+        mem_text = "\n".join(f"[{e.keyword}] {e.content}" for e in memories)
+
+        # ... build your messages and call the LLM ...
+
+        # Record the turn for async compression
+        worker.add_turn(Turn(role="user",      content=user_msg,  index=i*2))
+        worker.add_turn(Turn(role="assistant", content=ai_reply,  index=i*2+1))
+```
+
+Compression fires automatically in the background once `min_turns_to_compress` turns have accumulated.
+
+---
+
+### Inspecting pool state
+
+```python
+entries = agent.pool.get_all()
+print(f"Pool: {agent.pool.size} entries")
+
+for e in sorted(entries, key=lambda x: -x.use_count):
+    print(f"[{e.keyword}] used×{e.use_count} — {e.content[:80]}")
+```
+
+Or via the debug endpoint when `server.py` is running:
+
+```bash
+curl http://localhost:8000/debug/pool | python3 -m json.tool
+```
+
+---
+
 ## Bun/npm Usage Guide
 
 ### Quick start
