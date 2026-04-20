@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <title>Memory PoC Dashboard</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <style>
+    /* markdown prose styles */
+    .md-body h1,.md-body h2,.md-body h3 { font-weight:700; margin:.5em 0 .25em; }
+    .md-body h1 { font-size:1.2em; } .md-body h2 { font-size:1.1em; } .md-body h3 { font-size:1em; }
+    .md-body p  { margin:.25em 0; }
+    .md-body ul,.md-body ol { padding-left:1.2em; margin:.25em 0; }
+    .md-body li { margin:.1em 0; }
+    .md-body code { background:#0d1f0d; padding:.1em .3em; border-radius:3px; font-size:.85em; }
+    .md-body pre  { background:#0d1f0d; padding:.6em; border-radius:4px; overflow-x:auto; margin:.4em 0; }
+    .md-body pre code { background:none; padding:0; }
+    .md-body strong { color:#86efac; }
+    .md-body em { color:#93c5fd; }
+    .msg-user { background: #1e3a5f; border-left: 3px solid #3b82f6; }
+    .msg-ai   { background: #1a2e1a; border-left: 3px solid #22c55e; }
+    .ev-compress_start  { color: #fbbf24; }
+    .ev-compress_done   { color: #34d399; }
+    .ev-compress_error  { color: #f87171; }
+    .ev-memory_inject   { color: #60a5fa; }
+    .ev-pool_evict      { color: #f87171; }
+    .ev-turn_user       { color: #9ca3af; }
+    .ev-turn_assistant  { color: #d1d5db; }
+    .ev-pool_state      { color: #a78bfa; }
+    .ev-context_built   { color: #f9a8d4; border-left: 2px solid #f9a8d4; padding-left: 4px; margin: 4px 0; }
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: #1f2937; }
+    ::-webkit-scrollbar-thumb { background: #374151; border-radius: 2px; }
+  </style>
+</head>
+<body class="bg-gray-900 text-gray-100 h-screen flex flex-col overflow-hidden">
+
+  <!-- Header -->
+  <div class="bg-gray-800 border-b border-gray-700 px-4 py-2 flex items-center justify-between flex-shrink-0">
+    <div class="flex items-center gap-3">
+      <h1 class="font-bold text-sm">Memory PoC Dashboard</h1>
+      <span class="text-xs text-gray-500">gemma-4-31b-it / gemma-4-26b-a4b-it</span>
+    </div>
+    <div class="flex items-center gap-4 text-xs text-gray-400">
+      <span>Pool: <span id="poolSize" class="text-purple-400 font-mono">0</span>/100</span>
+      <span>Turns: <span id="turnCount" class="text-blue-400 font-mono">0</span></span>
+      <span id="statusDot" class="inline-block w-2 h-2 rounded-full bg-gray-500" title="connecting..."></span>
+    </div>
+  </div>
+
+  <!-- Main -->
+  <div class="flex-1 flex overflow-hidden">
+
+    <!-- Chat panel -->
+    <div class="flex-1 flex flex-col min-w-0 border-r border-gray-700">
+      <div class="px-3 py-1.5 text-xs text-gray-500 border-b border-gray-700 flex-shrink-0">對話</div>
+      <div id="messages" class="flex-1 overflow-y-auto p-3 space-y-2"></div>
+      <div class="p-3 border-t border-gray-700 flex gap-2 flex-shrink-0">
+        <textarea id="input" rows="1"
+          class="flex-1 bg-gray-800 border border-gray-600 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-500 resize-none overflow-hidden"
+          placeholder="輸入訊息… (Enter 送出，Shift+Enter 換行)"></textarea>
+        <button id="send"
+          class="bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 disabled:text-gray-500 px-4 py-2 rounded text-sm transition-colors">
+          送出
+        </button>
+      </div>
+    </div>
+
+    <!-- Monitor panel -->
+    <div class="w-96 flex flex-col flex-shrink-0">
+      <!-- Tab bar -->
+      <div class="flex border-b border-gray-700 flex-shrink-0">
+        <button id="tab-events" class="tab-btn px-3 py-1.5 text-xs border-b-2 border-blue-500 text-blue-400">Events</button>
+        <button id="tab-pool"   class="tab-btn px-3 py-1.5 text-xs border-b-2 border-transparent text-gray-500 hover:text-gray-300">Pool</button>
+        <button id="tab-prompt" class="tab-btn px-3 py-1.5 text-xs border-b-2 border-transparent text-gray-500 hover:text-gray-300">Prompt</button>
+        <div class="flex-1"></div>
+        <button id="clearLog"    class="px-3 py-1.5 text-xs text-gray-600 hover:text-gray-400">clear</button>
+        <button id="refreshPool" class="px-3 py-1.5 text-xs text-gray-600 hover:text-gray-400 hidden">↺</button>
+      </div>
+      <!-- Events pane -->
+      <div id="pane-events" class="flex-1 overflow-y-auto p-2 space-y-0.5 font-mono text-xs"></div>
+      <!-- Pool pane -->
+      <div id="pane-pool" class="flex-1 overflow-y-auto p-2 font-mono text-xs hidden">
+        <div id="pool-content" class="text-gray-300 whitespace-pre leading-relaxed"></div>
+      </div>
+      <!-- Prompt pane -->
+      <div id="pane-prompt" class="flex-1 overflow-y-auto p-2 font-mono text-xs hidden">
+        <div id="prompt-content" class="whitespace-pre leading-relaxed"></div>
+      </div>
+    </div>
+
+  </div>
+
+  <script>
+    const messagesEl    = document.getElementById('messages')
+    const eventsEl      = document.getElementById('pane-events')
+    const poolPaneEl    = document.getElementById('pane-pool')
+    const poolContentEl = document.getElementById('pool-content')
+    const promptPaneEl  = document.getElementById('pane-prompt')
+    const promptContent = document.getElementById('prompt-content')
+    const inputEl       = document.getElementById('input')
+    const sendBtn       = document.getElementById('send')
+    const poolSizeEl    = document.getElementById('poolSize')
+    const turnCountEl   = document.getElementById('turnCount')
+    const statusDot     = document.getElementById('statusDot')
+    const clearLogBtn   = document.getElementById('clearLog')
+    const refreshBtn    = document.getElementById('refreshPool')
+    const tabEvents     = document.getElementById('tab-events')
+    const tabPool       = document.getElementById('tab-pool')
+    const tabPrompt     = document.getElementById('tab-prompt')
+
+    let totalTurns = 0
+    let activeTab = 'events'
+
+    // ── Tab switching ─────────────────────────────────────────
+    const tabDefs = {
+      events: { btn: null, pane: null, color: 'border-blue-500 text-blue-400' },
+      pool:   { btn: null, pane: null, color: 'border-purple-400 text-purple-400' },
+      prompt: { btn: null, pane: null, color: 'border-yellow-400 text-yellow-400' },
+    }
+
+    function switchTab(tab) {
+      activeTab = tab
+      const inactive = 'tab-btn px-3 py-1.5 text-xs border-b-2 border-transparent text-gray-500 hover:text-gray-300'
+      tabEvents.className = tab === 'events' ? `tab-btn px-3 py-1.5 text-xs border-b-2 ${tabDefs.events.color}` : inactive
+      tabPool.className   = tab === 'pool'   ? `tab-btn px-3 py-1.5 text-xs border-b-2 ${tabDefs.pool.color}`   : inactive
+      tabPrompt.className = tab === 'prompt' ? `tab-btn px-3 py-1.5 text-xs border-b-2 ${tabDefs.prompt.color}` : inactive
+      eventsEl.classList.toggle('hidden',    tab !== 'events')
+      poolPaneEl.classList.toggle('hidden',  tab !== 'pool')
+      promptPaneEl.classList.toggle('hidden',tab !== 'prompt')
+      clearLogBtn.classList.toggle('hidden', tab !== 'events')
+      refreshBtn.classList.toggle('hidden',  tab !== 'pool')
+      if (tab === 'pool') loadPoolJSON()
+    }
+
+    tabEvents.addEventListener('click', () => switchTab('events'))
+    tabPool.addEventListener('click',   () => switchTab('pool'))
+
+    // ── Pool JSON loader ──────────────────────────────────────
+    async function loadPoolJSON() {
+      poolContentEl.textContent = 'loading...'
+      try {
+        const resp = await fetch('/debug/pool-file')
+        const entries = await resp.json()
+        if (!entries.length) { poolContentEl.textContent = '(pool is empty)'; return }
+
+        const lines = entries.map(e =>
+          `[${e.keyword}]\n` +
+          `  content   : ${e.content}\n` +
+          `  related   : ${e.relatedKeywords.join(', ')}\n` +
+          `  turn      : #${e.createdAtTurn}   used×${e.useCount}\n` +
+          `  lastUsed  : ${new Date(e.lastUsed).toLocaleTimeString('zh-Hant', {hour12:false})}\n`
+        )
+        poolContentEl.textContent = lines.join('\n')
+      } catch (err) {
+        poolContentEl.textContent = `Error: ${err.message}`
+      }
+    }
+
+    refreshBtn.addEventListener('click', loadPoolJSON)
+
+    // ── SSE event stream ──────────────────────────────────────
+    const evtSource = new EventSource('/events')
+    evtSource.onopen  = () => { statusDot.className = 'inline-block w-2 h-2 rounded-full bg-green-500'; statusDot.title = 'connected' }
+    evtSource.onerror = () => { statusDot.className = 'inline-block w-2 h-2 rounded-full bg-red-500';   statusDot.title = 'disconnected' }
+    evtSource.onmessage = (e) => {
+      const event = JSON.parse(e.data)
+      appendEvent(event)
+      if (event.data.poolSize !== undefined) poolSizeEl.textContent = String(event.data.poolSize)
+      if (event.kind === 'compress_done' && activeTab === 'pool') loadPoolJSON()
+      if (event.kind === 'pool_state'    && activeTab === 'pool') loadPoolJSON()
+      if (event.kind === 'prompt_sent') renderPrompt(event.data.messages)
+    }
+
+    // ── Prompt renderer ───────────────────────────────────────
+    const MEMORY_MARKER = '## Conversation Memory\n'
+
+    function makeBlock(text, textClass, borderClass) {
+      const d = document.createElement('div')
+      d.className = `${textClass} border-l-2 ${borderClass} pl-2 whitespace-pre-wrap mb-1`
+      d.textContent = text
+      return d
+    }
+
+    function renderPrompt(messages) {
+      promptContent.textContent = ''
+      const roleColors = { system: 'text-yellow-400', user: 'text-blue-400', assistant: 'text-green-400' }
+
+      messages.forEach((msg, i) => {
+        const wrap = document.createElement('div')
+        wrap.className = 'mb-4'
+
+        const header = document.createElement('div')
+        header.className = `font-bold mb-1 ${roleColors[msg.role] ?? 'text-gray-400'}`
+        header.textContent = `[${i}] ${msg.role.toUpperCase()}`
+        wrap.appendChild(header)
+
+        if (msg.role === 'user' && msg.content.includes(MEMORY_MARKER)) {
+          // Memory prepended to user message — split and highlight separately
+          const [memoryPart, , userPart] = msg.content.split(/\n---\n\n?/)
+
+          const memLabel = document.createElement('div')
+          memLabel.className = 'text-purple-400 font-bold mb-1'
+          memLabel.textContent = '▼ MEMORY FROM POOL  (KV-cache safe: only this user turn is new)'
+          wrap.appendChild(memLabel)
+          wrap.appendChild(makeBlock(memoryPart.replace('## Conversation Memory\n', '').trim(), 'text-purple-300', 'border-purple-600'))
+
+          const userLabel = document.createElement('div')
+          userLabel.className = 'text-blue-400 font-bold mt-2 mb-1'
+          userLabel.textContent = '▼ USER MESSAGE'
+          wrap.appendChild(userLabel)
+          wrap.appendChild(makeBlock((userPart ?? '').trim(), 'text-gray-300', 'border-blue-700'))
+
+        } else if (msg.role === 'system') {
+          wrap.appendChild(makeBlock(msg.content, 'text-gray-400', 'border-gray-600'))
+          const note = document.createElement('div')
+          note.className = 'text-gray-600 italic mt-1'
+          note.textContent = '(stable — never changes, maximises KV cache)'
+          wrap.appendChild(note)
+
+        } else {
+          wrap.appendChild(makeBlock(msg.content, 'text-gray-300', 'border-gray-700'))
+        }
+
+        promptContent.appendChild(wrap)
+      })
+
+      if (activeTab !== 'prompt') tabPrompt.textContent = 'Prompt ●'
+    }
+
+    tabPrompt.addEventListener('click', () => {
+      switchTab('prompt')
+      tabPrompt.textContent = 'Prompt'
+    })
+
+    // ── Event log renderer ────────────────────────────────────
+    const eventIcons = {
+      compress_start: '⏳', compress_done: '✓', compress_error: '✗',
+      memory_inject: '→', pool_evict: '↓', turn_user: '◦', turn_assistant: '◦', pool_state: '◉',
+      context_built: '◈',
+    }
+
+    function appendEvent(event) {
+      const time = new Date(event.ts).toLocaleTimeString('zh-Hant', { hour12: false })
+      const icon = eventIcons[event.kind] ?? '·'
+      const d = event.data
+      const lines = [`${time} ${icon} ${event.kind}`]
+
+      switch (event.kind) {
+        case 'compress_start':  lines.push(`  compressing ${d.turnCount} turns`); break
+        case 'compress_done':
+          lines.push(`  +${d.entriesAdded} entries, pool=${d.poolSize}`)
+          if (d.entries?.length) d.entries.forEach(e => lines.push(`  [${e.keyword}] ${e.preview}`))
+          break
+        case 'compress_error':  lines.push(`  ${String(d.error).slice(0, 80)}`); break
+        case 'memory_inject':
+          lines.push(`  ${d.count} entries injected, pool=${d.poolSize}`)
+          if (d.entries?.length) d.entries.forEach(e => lines.push(`  [${e.keyword}] ${e.preview}`))
+          break
+        case 'pool_evict':      lines.push(`  evicted: ${d.keyword}`); break
+        case 'context_built':
+          lines.push(`  raw turns: ${d.rawTurns} (idx ${d.rawTurnIndices?.join(',')})`)
+          lines.push(`  dropped turns (not in raw): ${d.droppedTurns}`)
+          if (d.memoryEntries > 0) {
+            lines.push(`  memory pool entries injected: ${d.memoryEntries}`)
+            d.memoryFromPool?.forEach(e => lines.push(`    [${e.keyword}] (turn#${e.createdAtTurn}, used×${e.useCount}) ${e.preview}`))
+          } else {
+            lines.push(`  no memory injected (pool empty or no match)`)
+          }
+          break
+      }
+
+      const row = document.createElement('div')
+      row.className = `ev-${event.kind} whitespace-pre leading-relaxed`
+      row.textContent = lines.join('\n')
+      eventsEl.appendChild(row)
+      eventsEl.scrollTop = eventsEl.scrollHeight
+    }
+
+    // ── Chat ──────────────────────────────────────────────────
+    function appendMessage(role, content) {
+      const div = document.createElement('div')
+      div.className = `rounded p-3 text-sm leading-relaxed ${role === 'user' ? 'msg-user' : 'msg-ai'}`
+      const label = document.createElement('div')
+      label.className = 'text-xs font-bold opacity-60 mb-1'
+      label.textContent = role === 'user' ? 'You' : 'AI'
+      const text = document.createElement('div')
+      text.textContent = content
+      div.appendChild(label)
+      div.appendChild(text)
+      messagesEl.appendChild(div)
+      messagesEl.scrollTop = messagesEl.scrollHeight
+      return text
+    }
+
+    async function sendMessage() {
+      const msg = inputEl.value.trim()
+      if (!msg) return
+      inputEl.value = ''
+      inputEl.style.height = 'auto'
+      sendBtn.disabled = true
+
+      appendMessage('user', msg)
+      totalTurns++
+      turnCountEl.textContent = String(totalTurns)
+
+      const textNode = appendMessage('ai', '')
+      textNode.className = 'md-body'
+      let fullText = ''
+      let renderPending = false
+
+      function renderMarkdown() {
+        textNode.replaceChildren(
+          document.createRange().createContextualFragment(marked.parse(fullText))
+        )
+        messagesEl.scrollTop = messagesEl.scrollHeight
+        renderPending = false
+      }
+
+      function scheduleRender() {
+        if (renderPending) return
+        renderPending = true
+        requestAnimationFrame(renderMarkdown)
+      }
+
+      try {
+        const resp = await fetch('/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: msg }),
+        })
+
+        const reader = resp.body.getReader()
+        const dec = new TextDecoder()
+
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          const raw = dec.decode(value)
+          for (const line of raw.split('\n')) {
+            if (!line.startsWith('data: ')) continue
+            const d = JSON.parse(line.slice(6))
+            if (d.chunk) { fullText += d.chunk; scheduleRender() }
+            if (d.done)  { totalTurns++; turnCountEl.textContent = String(totalTurns); renderMarkdown() }
+            if (d.error) { textNode.textContent = `[Error] ${d.error}`; textNode.className = 'text-red-400' }
+          }
+        }
+      } catch (err) {
+        textNode.textContent = `[Error] ${err.message}`
+        textNode.className = 'text-red-400'
+      } finally {
+        sendBtn.disabled = false
+        inputEl.focus()
+        messagesEl.scrollTop = messagesEl.scrollHeight
+      }
+    }
+
+    function autoResize() {
+      inputEl.style.height = 'auto'
+      inputEl.style.height = Math.min(inputEl.scrollHeight, 160) + 'px'
+    }
+
+    sendBtn.addEventListener('click', sendMessage)
+    inputEl.addEventListener('input', autoResize)
+    inputEl.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault()
+        sendMessage()
+      }
+    })
+    clearLogBtn.addEventListener('click', () => { eventsEl.replaceChildren() })
+  </script>
+</body>
+</html>

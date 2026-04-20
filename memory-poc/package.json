@@ -1,0 +1,9 @@
+{
+  "name": "memory-poc",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "bun run src/main.ts",
+    "dev": "bun --watch src/main.ts",
+    "log": "LOG_FILE=./events.jsonl bun run src/main.ts"
+  }
+}

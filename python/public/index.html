@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LLM Memory Pool — Python/FastAPI</title>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: monospace; background: #0d0d0d; color: #e0e0e0; height: 100vh; display: flex; flex-direction: column; }
+header { padding: 8px 16px; background: #1a1a1a; border-bottom: 1px solid #333; display: flex; align-items: center; gap: 12px; }
+header h1 { font-size: 14px; color: #aaa; }
+#conn { font-size: 12px; padding: 2px 8px; border-radius: 10px; background: #2a2a2a; color: #888; }
+#conn.ok { background: #1a2a1a; color: #4caf50; }
+#conn.err { background: #2a1a1a; color: #f44336; }
+nav { display: flex; background: #111; border-bottom: 1px solid #333; }
+nav button { padding: 8px 16px; background: none; border: none; color: #888; cursor: pointer; font-family: monospace; font-size: 13px; border-bottom: 2px solid transparent; }
+nav button.active { color: #e0e0e0; border-bottom-color: #7c3aed; }
+.badge { display: inline-block; background: #7c3aed; border-radius: 50%; width: 8px; height: 8px; margin-left: 4px; vertical-align: middle; }
+.tab { display: none; flex: 1; overflow: hidden; flex-direction: column; }
+.tab.active { display: flex; }
+#chat-tab.active { display: flex; }
+#messages { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+.msg { max-width: 85%; padding: 10px 14px; border-radius: 8px; line-height: 1.5; font-size: 14px; }
+.msg.user { background: #1e3a5f; align-self: flex-end; white-space: pre-wrap; }
+.msg.assistant { background: #1a1a1a; border: 1px solid #2a2a2a; align-self: flex-start; }
+.msg .md-content h1,.msg .md-content h2,.msg .md-content h3 { margin: 8px 0 4px; }
+.msg .md-content p { margin: 4px 0; }
+.msg .md-content ul,.msg .md-content ol { margin: 4px 0 4px 20px; }
+.msg .md-content code { background: #2a2a2a; padding: 1px 4px; border-radius: 3px; font-size: 12px; }
+.msg .md-content pre { background: #0a0a0a; padding: 10px; border-radius: 4px; overflow-x: auto; margin: 8px 0; }
+.msg .md-content pre code { background: none; padding: 0; }
+.msg.typing::after { content: '▋'; animation: blink 1s infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+#input-row { display: flex; gap: 8px; padding: 12px; border-top: 1px solid #222; }
+#user-input { flex: 1; background: #111; border: 1px solid #333; color: #e0e0e0; padding: 8px 12px; font-family: monospace; font-size: 14px; border-radius: 6px; resize: none; min-height: 40px; max-height: 200px; overflow-y: auto; }
+#send-btn { padding: 8px 16px; background: #7c3aed; border: none; color: white; cursor: pointer; font-family: monospace; border-radius: 6px; }
+#send-btn:disabled { background: #333; cursor: default; }
+#events-tab { overflow-y: auto; }
+#events-list { padding: 8px; display: flex; flex-direction: column; gap: 2px; }
+.event-row { font-size: 12px; display: flex; gap: 8px; padding: 4px 8px; border-radius: 3px; }
+.event-row:hover { background: #1a1a1a; }
+.event-row .ts { color: #555; min-width: 80px; }
+.event-row .kind { min-width: 160px; }
+.event-row.compress_start .kind { color: #ffa726; }
+.event-row.compress_done .kind { color: #66bb6a; }
+.event-row.compress_error .kind { color: #ef5350; }
+.event-row.memory_inject .kind { color: #42a5f5; }
+.event-row.pool_evict .kind { color: #ab47bc; }
+.event-row.pool_state .kind { color: #26c6da; }
+.event-row.turn_user .kind { color: #8bc34a; }
+.event-row.turn_assistant .kind { color: #7e57c2; }
+.event-row.context_built .kind { color: #ffd54f; }
+#pool-tab { overflow-y: auto; padding: 12px; }
+#pool-count { font-size: 12px; color: #666; margin-bottom: 8px; }
+#pool-list { display: flex; flex-direction: column; gap: 8px; }
+.pool-entry { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 6px; padding: 10px 12px; }
+.pool-entry .kw { color: #7c3aed; font-weight: bold; font-size: 13px; margin-bottom: 4px; }
+.pool-entry .content { color: #ccc; font-size: 12px; line-height: 1.4; margin-bottom: 6px; }
+.pool-entry .meta { font-size: 11px; color: #555; display: flex; gap: 12px; }
+.pool-entry .related { font-size: 11px; color: #7c3aed88; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>LLM Memory Pool — Python/FastAPI</h1>
+  <span id="conn">connecting…</span>
+</header>
+
+<nav>
+  <button class="active" data-tab="chat" onclick="switchTab(this)">Chat</button>
+  <button data-tab="events" onclick="switchTab(this)">Events</button>
+  <button data-tab="pool" id="pool-btn" onclick="switchTab(this)">Pool</button>
+</nav>
+
+<div id="chat-tab" class="tab active">
+  <div id="messages"></div>
+  <div id="input-row">
+    <textarea id="user-input" rows="1" placeholder="Type a message… (Shift+Enter for newline)"></textarea>
+    <button id="send-btn" onclick="sendMessage()">Send</button>
+  </div>
+</div>
+
+<div id="events-tab" class="tab">
+  <div id="events-list"></div>
+</div>
+
+<div id="pool-tab" class="tab">
+  <div id="pool-count">Pool empty</div>
+  <div id="pool-list"></div>
+</div>
+
+<script>
+function el(tag, cls) { const e = document.createElement(tag); if (cls) e.className = cls; return e }
+function txt(n, t) { n.textContent = t; return n }
+function app(p, c) { p.appendChild(c); return c }
+
+function switchTab(btn) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'))
+  document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'))
+  document.getElementById(`${btn.dataset.tab}-tab`).classList.add('active')
+  btn.classList.add('active')
+  if (btn.dataset.tab === 'pool') refreshPool()
+}
+
+function emitEvent(kind, data) {
+  const row = el('div', `event-row ${kind}`)
+  app(row, txt(el('span', 'ts'), new Date().toLocaleTimeString()))
+  app(row, txt(el('span', 'kind'), kind))
+  const detail = data ? (typeof data === 'string' ? data : Object.entries(data).map(([k,v]) => `${k}=${JSON.stringify(v)}`).join(' ')) : ''
+  app(row, txt(el('span', 'detail'), detail))
+  const list = document.getElementById('events-list')
+  list.appendChild(row)
+  list.scrollTop = list.scrollHeight
+}
+
+const evtSource = new EventSource('/events')
+evtSource.onopen = () => { const c = document.getElementById('conn'); c.textContent = 'connected'; c.className = 'ok' }
+evtSource.onerror = () => { const c = document.getElementById('conn'); c.textContent = 'disconnected'; c.className = 'err' }
+evtSource.onmessage = (e) => {
+  try {
+    const event = JSON.parse(e.data)
+    if (event.kind === 'ping') return
+    emitEvent(event.kind, event.data)
+    if (event.kind === 'compress_done' || event.kind === 'pool_state') {
+      if (document.getElementById('pool-tab').classList.contains('active')) refreshPool()
+      else { const btn = document.getElementById('pool-btn'); btn.textContent = ''; btn.appendChild(document.createTextNode('Pool ')); btn.appendChild(el('span', 'badge')) }
+    }
+  } catch {}
+}
+
+async function refreshPool() {
+  try {
+    const res = await fetch('/debug/pool')
+    const data = await res.json()
+    const list = document.getElementById('pool-list')
+    txt(document.getElementById('pool-count'), `${data.size} entries in pool${data.isCompressing ? ' (compressing…)' : ''}`)
+    list.textContent = ''
+    const sorted = [...data.entries].sort((a,b) => b.lastUsed - a.lastUsed)
+    for (const entry of sorted) {
+      const div = el('div', 'pool-entry')
+      app(div, txt(el('div', 'kw'), entry.keyword))
+      app(div, txt(el('div', 'content'), entry.content))
+      const meta = el('div', 'meta')
+      app(meta, txt(el('span'), `used\u00d7${entry.useCount}`))
+      app(meta, txt(el('span'), `turn #${entry.createdAtTurn}`))
+      app(meta, txt(el('span'), new Date(entry.lastUsed).toLocaleTimeString()))
+      div.appendChild(meta)
+      if (entry.relatedKeywords?.length) app(div, txt(el('div', 'related'), `related: ${entry.relatedKeywords.join(', ')}`))
+      list.appendChild(div)
+    }
+  } catch {}
+}
+
+function renderMarkdown(container, text) {
+  container.className = 'md-content'
+  const raw = marked.parse(text)
+  const safe = DOMPurify.sanitize(raw)
+  const tmp = el('div')
+  tmp.insertAdjacentHTML('afterbegin', safe)
+  container.replaceChildren(...tmp.childNodes)
+}
+
+async function sendMessage() {
+  const input = document.getElementById('user-input')
+  const btn = document.getElementById('send-btn')
+  const text = input.value.trim()
+  if (!text || btn.disabled) return
+
+  input.value = ''; input.style.height = 'auto'; btn.disabled = true
+
+  const msgs = document.getElementById('messages')
+  const userEl = el('div', 'msg user')
+  userEl.textContent = text
+  msgs.appendChild(userEl)
+
+  const asstEl = el('div', 'msg assistant typing')
+  const mdContainer = el('div')
+  asstEl.appendChild(mdContainer)
+  msgs.appendChild(asstEl)
+  msgs.scrollTop = 9999
+
+  let fullText = '', rafId = null
+  function scheduleRender() {
+    if (rafId) return
+    rafId = requestAnimationFrame(() => { rafId = null; renderMarkdown(mdContainer, fullText) })
+  }
+
+  try {
+    const res = await fetch('/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: text }),
+    })
+    const reader = res.body.getReader()
+    const decoder = new TextDecoder()
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      fullText += decoder.decode(value, { stream: true })
+      scheduleRender()
+      msgs.scrollTop = 9999
+    }
+    cancelAnimationFrame(rafId)
+    renderMarkdown(mdContainer, fullText)
+    asstEl.classList.remove('typing')
+  } catch (err) {
+    asstEl.classList.remove('typing')
+    mdContainer.textContent = `Error: ${err.message}`
+  }
+
+  btn.disabled = false; input.focus(); msgs.scrollTop = 9999
+}
+
+const textarea = document.getElementById('user-input')
+textarea.addEventListener('input', () => { textarea.style.height = 'auto'; textarea.style.height = textarea.scrollHeight + 'px' })
+textarea.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage() } })
+</script>
+</body>
+</html>

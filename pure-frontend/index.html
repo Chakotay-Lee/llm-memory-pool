@@ -1,0 +1,710 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LLM Memory Pool — Pure Frontend</title>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/universal-sentence-encoder@1.3.3/dist/universal-sentence-encoder.min.js"></script>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: monospace; background: #0d0d0d; color: #e0e0e0; height: 100vh; display: flex; flex-direction: column; }
+
+header { padding: 8px 16px; background: #1a1a1a; border-bottom: 1px solid #333; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+header h1 { font-size: 14px; color: #aaa; flex-shrink: 0; }
+#settings-bar { display: flex; gap: 8px; align-items: center; flex: 1; flex-wrap: wrap; }
+#settings-bar input { background: #111; border: 1px solid #333; color: #e0e0e0; padding: 3px 6px; font-family: monospace; font-size: 12px; border-radius: 3px; }
+#api-key-input { width: 300px; }
+#model-input, #mem-model-input { width: 170px; }
+#embed-status { font-size: 11px; padding: 2px 8px; border-radius: 10px; background: #222; color: #666; flex-shrink: 0; white-space: nowrap; }
+#embed-status.ready { background: #1a2a1a; color: #4caf50; }
+#embed-status.loading { background: #2a2a1a; color: #ffa726; }
+#embed-status.err { background: #2a1a1a; color: #ef5350; }
+#chat-status { font-size: 12px; color: #666; flex-shrink: 0; }
+#chat-status.ok { color: #4caf50; }
+#chat-status.err { color: #f44336; }
+
+nav { display: flex; background: #111; border-bottom: 1px solid #333; }
+nav button { padding: 8px 16px; background: none; border: none; color: #888; cursor: pointer; font-family: monospace; font-size: 13px; border-bottom: 2px solid transparent; }
+nav button.active { color: #e0e0e0; border-bottom-color: #7c3aed; }
+.badge { display: inline-block; background: #7c3aed; border-radius: 50%; width: 8px; height: 8px; margin-left: 4px; vertical-align: middle; }
+
+.tab { display: none; flex: 1; overflow: hidden; flex-direction: column; }
+.tab.active { display: flex; }
+#chat-tab.active { display: flex; }
+
+#messages { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+.msg { max-width: 85%; padding: 10px 14px; border-radius: 8px; line-height: 1.5; font-size: 14px; }
+.msg.user { background: #1e3a5f; align-self: flex-end; white-space: pre-wrap; }
+.msg.assistant { background: #1a1a1a; border: 1px solid #2a2a2a; align-self: flex-start; }
+.msg .md-content h1,.msg .md-content h2,.msg .md-content h3 { margin: 8px 0 4px; }
+.msg .md-content p { margin: 4px 0; }
+.msg .md-content ul,.msg .md-content ol { margin: 4px 0 4px 20px; }
+.msg .md-content code { background: #2a2a2a; padding: 1px 4px; border-radius: 3px; font-size: 12px; }
+.msg .md-content pre { background: #0a0a0a; padding: 10px; border-radius: 4px; overflow-x: auto; margin: 8px 0; }
+.msg .md-content pre code { background: none; padding: 0; }
+.msg.typing::after { content: '▋'; animation: blink 1s infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+
+#input-row { display: flex; gap: 8px; padding: 12px; border-top: 1px solid #222; }
+#user-input { flex: 1; background: #111; border: 1px solid #333; color: #e0e0e0; padding: 8px 12px; font-family: monospace; font-size: 14px; border-radius: 6px; resize: none; min-height: 40px; max-height: 200px; overflow-y: auto; }
+#send-btn { padding: 8px 16px; background: #7c3aed; border: none; color: white; cursor: pointer; font-family: monospace; border-radius: 6px; font-size: 14px; }
+#send-btn:disabled { background: #333; cursor: default; }
+
+#events-tab { overflow-y: auto; }
+#events-list { padding: 8px; display: flex; flex-direction: column; gap: 2px; }
+.event-row { font-size: 12px; display: flex; gap: 8px; padding: 4px 8px; border-radius: 3px; }
+.event-row:hover { background: #1a1a1a; }
+.event-row .ts { color: #555; min-width: 80px; }
+.event-row .kind { min-width: 160px; }
+.event-row.compress_start .kind { color: #ffa726; }
+.event-row.compress_done .kind { color: #66bb6a; }
+.event-row.compress_error .kind { color: #ef5350; }
+.event-row.memory_inject .kind { color: #42a5f5; }
+.event-row.pool_evict .kind { color: #ab47bc; }
+.event-row.pool_state .kind { color: #26c6da; }
+.event-row.turn_user .kind { color: #8bc34a; }
+.event-row.turn_assistant .kind { color: #7e57c2; }
+.event-row.context_built .kind { color: #ffd54f; }
+.event-row.embed_ready .kind { color: #4caf50; }
+
+#pool-tab { overflow-y: auto; padding: 12px; }
+#pool-count { font-size: 12px; color: #666; margin-bottom: 8px; }
+#pool-list { display: flex; flex-direction: column; gap: 8px; }
+.pool-entry { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 6px; padding: 10px 12px; }
+.pool-entry .kw { color: #7c3aed; font-weight: bold; font-size: 13px; margin-bottom: 4px; }
+.pool-entry .content { color: #ccc; font-size: 12px; line-height: 1.4; margin-bottom: 6px; }
+.pool-entry .meta { font-size: 11px; color: #555; display: flex; gap: 12px; flex-wrap: wrap; }
+.pool-entry .related { font-size: 11px; color: #7c3aed88; }
+.emb-badge { font-size: 10px; background: #1a2a1a; color: #4caf50; padding: 1px 5px; border-radius: 8px; margin-left: 6px; }
+
+#prompt-tab { overflow-y: auto; padding: 12px; }
+#prompt-display { display: flex; flex-direction: column; gap: 10px; }
+.prompt-msg { border-radius: 6px; padding: 10px 12px; font-size: 12px; }
+.prompt-msg.system { background: #1a2a1a; border: 1px solid #2a3a2a; }
+.prompt-msg.user-msg { background: #1a1a2a; border: 1px solid #2a2a3a; }
+.prompt-msg.assistant-msg { background: #1a1a1a; border: 1px solid #2a2a2a; }
+.role-label { font-weight: bold; margin-bottom: 4px; }
+.role-label.sys { color: #4caf50; }
+.role-label.usr { color: #42a5f5; }
+.role-label.ast { color: #7e57c2; }
+.stable-note { color: #555; font-size: 11px; font-weight: normal; }
+.memory-block { background: #2a1a3a; border-left: 3px solid #7c3aed; padding: 6px 10px; margin-bottom: 8px; border-radius: 0 4px 4px 0; }
+.mem-header { color: #7c3aed; font-size: 11px; font-weight: bold; margin-bottom: 4px; }
+.mem-content { color: #b39ddb; font-size: 11px; white-space: pre-wrap; }
+.text-content { white-space: pre-wrap; color: #ccc; }
+#context-info { font-size: 11px; color: #555; margin-bottom: 8px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>LLM Memory Pool</h1>
+  <div id="settings-bar">
+    <input id="api-key-input" type="password" placeholder="Gemini API Key" />
+    <input id="model-input" type="text" value="gemma-4-31b-it" placeholder="Main model" />
+    <input id="mem-model-input" type="text" value="gemma-4-26b-a4b-it" placeholder="Memory model" />
+  </div>
+  <span id="embed-status">embed: init…</span>
+  <span id="chat-status">ready</span>
+</header>
+
+<nav>
+  <button class="active" data-tab="chat">Chat</button>
+  <button data-tab="events">Events</button>
+  <button data-tab="pool">Pool</button>
+  <button data-tab="prompt" id="prompt-tab-btn">Prompt</button>
+</nav>
+
+<div id="chat-tab" class="tab active">
+  <div id="messages"></div>
+  <div id="input-row">
+    <textarea id="user-input" rows="1" placeholder="Type a message… (Shift+Enter for newline)"></textarea>
+    <button id="send-btn">Send</button>
+  </div>
+</div>
+<div id="events-tab" class="tab"><div id="events-list"></div></div>
+<div id="pool-tab" class="tab"><div id="pool-count">Pool empty</div><div id="pool-list"></div></div>
+<div id="prompt-tab" class="tab"><div id="context-info"></div><div id="prompt-display"></div></div>
+
+<script>
+// ─────────────────────────────────────────────────────────────────────────────
+// Config
+// ─────────────────────────────────────────────────────────────────────────────
+var BASE_URL      = 'https://generativelanguage.googleapis.com/v1beta/openai'
+var MAX_RAW_TURNS = 4
+var MIN_COMPRESS  = 2
+var MAX_POOL      = 100
+var INJECT_BUDGET = 800
+
+// ─────────────────────────────────────────────────────────────────────────────
+// State
+// ─────────────────────────────────────────────────────────────────────────────
+var turns = [], turnIndex = 0
+var memoryPool = [], pendingTurns = [], isCompressing = false
+var lastPrompt = null
+var db = null
+var useModel = null, embedReady = false
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DOM helpers
+// ─────────────────────────────────────────────────────────────────────────────
+function el(tag, cls) { var e = document.createElement(tag); if (cls) e.className = cls; return e }
+function txt(n, t) { n.textContent = t; return n }
+function app(p, c) { p.appendChild(c); return c }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Status
+// ─────────────────────────────────────────────────────────────────────────────
+function setChatStatus(msg, isErr) {
+  var s = document.getElementById('chat-status')
+  s.textContent = msg
+  s.className = isErr ? 'err' : (msg === 'ready' ? 'ok' : '')
+}
+function setEmbedStatus(msg, cls) {
+  var s = document.getElementById('embed-status')
+  s.textContent = 'embed: ' + msg
+  s.className = cls || ''
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Embedding — TF.js Universal Sentence Encoder (UMD, works from file://)
+// ─────────────────────────────────────────────────────────────────────────────
+function initEmbedder() {
+  setEmbedStatus('loading…', 'loading')
+  // `use` global is exposed by the UMD script tag above
+  use.load().then(function(model) {
+    useModel = model
+    embedReady = true
+    setEmbedStatus('ready ✓', 'ready')
+    emitEvent('embed_ready', { model: 'universal-sentence-encoder' })
+  }).catch(function(err) {
+    setEmbedStatus('keyword fallback', 'err')
+    emitEvent('compress_error', { error: 'Embedder: ' + err.message })
+  })
+}
+
+function embedText(text, callback) {
+  if (!useModel) { callback(null); return }
+  useModel.embed([text.slice(0, 512)]).then(function(t) {
+    t.data().then(function(data) {
+      t.dispose()
+      callback(Array.from(data))
+    })
+  }).catch(function() { callback(null) })
+}
+
+function embedAll(texts, callback) {
+  var results = new Array(texts.length).fill(null)
+  var remaining = texts.length
+  if (remaining === 0) { callback(results); return }
+  texts.forEach(function(text, i) {
+    embedText(text, function(vec) {
+      results[i] = vec
+      remaining--
+      if (remaining === 0) callback(results)
+    })
+  })
+}
+
+function cosine(a, b) {
+  if (!a || !b || a.length !== b.length) return 0
+  var dot = 0, na = 0, nb = 0
+  for (var i = 0; i < a.length; i++) { dot += a[i]*b[i]; na += a[i]*a[i]; nb += b[i]*b[i] }
+  var d = Math.sqrt(na) * Math.sqrt(nb)
+  return d === 0 ? 0 : dot / d
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tab switching
+// ─────────────────────────────────────────────────────────────────────────────
+function switchTab(btn) {
+  var name = btn.dataset.tab
+  document.querySelectorAll('.tab').forEach(function(t) { t.classList.remove('active') })
+  document.querySelectorAll('nav button').forEach(function(b) { b.classList.remove('active') })
+  document.getElementById(name + '-tab').classList.add('active')
+  btn.classList.add('active')
+  if (name === 'prompt') { btn.textContent = 'Prompt'; renderPrompt() }
+  if (name === 'pool') renderPool()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Events log
+// ─────────────────────────────────────────────────────────────────────────────
+function emitEvent(kind, data) {
+  var row = el('div', 'event-row ' + kind)
+  app(row, txt(el('span', 'ts'), new Date().toLocaleTimeString()))
+  app(row, txt(el('span', 'kind'), kind))
+  var detail = ''
+  if (data) {
+    detail = typeof data === 'string' ? data
+      : Object.keys(data).map(function(k) { return k + '=' + JSON.stringify(data[k]) }).join(' ')
+  }
+  app(row, txt(el('span', 'detail'), detail))
+  var list = document.getElementById('events-list')
+  list.appendChild(row)
+  list.scrollTop = list.scrollHeight
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// IndexedDB
+// ─────────────────────────────────────────────────────────────────────────────
+function initDB(callback) {
+  var req = indexedDB.open('llm-memory-pool-v2', 1)
+  req.onupgradeneeded = function(e) {
+    var d = e.target.result
+    if (!d.objectStoreNames.contains('pool')) d.createObjectStore('pool', { keyPath: 'id' })
+  }
+  req.onsuccess = function(e) { db = e.target.result; callback() }
+  req.onerror = function() { callback() }
+}
+
+function dbSave() {
+  if (!db) return
+  var tx = db.transaction('pool', 'readwrite')
+  var store = tx.objectStore('pool')
+  store.clear()
+  memoryPool.forEach(function(e) { store.put(e) })
+}
+
+function dbLoad(callback) {
+  if (!db) { callback(); return }
+  var req = db.transaction('pool', 'readonly').objectStore('pool').getAll()
+  req.onsuccess = function() {
+    memoryPool = req.result || []
+    var withEmb = memoryPool.filter(function(e) { return e.embedding }).length
+    emitEvent('pool_state', { restored: memoryPool.length, withEmbedding: withEmb, source: 'IndexedDB' })
+    renderPool()
+    callback()
+  }
+  req.onerror = callback
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Settings
+// ─────────────────────────────────────────────────────────────────────────────
+function getApiKey() {
+  var v = document.getElementById('api-key-input').value.trim()
+  if (v) localStorage.setItem('gemini-api-key', v)
+  return v || localStorage.getItem('gemini-api-key') || ''
+}
+function getMainModel() { return document.getElementById('model-input').value.trim() || 'gemma-4-31b-it' }
+function getMemModel() { return document.getElementById('mem-model-input').value.trim() || 'gemma-4-26b-a4b-it' }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LLM — non-streaming (for compression)
+// ─────────────────────────────────────────────────────────────────────────────
+function chatComplete(model, messages, callback) {
+  fetch(BASE_URL + '/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + getApiKey() },
+    body: JSON.stringify({ model: model, messages: messages, max_tokens: 512, temperature: 0.2 }),
+  }).then(function(r) {
+    if (!r.ok) throw new Error('HTTP ' + r.status)
+    return r.json()
+  }).then(function(data) {
+    callback(null, stripThoughts(data.choices[0].message.content || ''))
+  }).catch(function(err) { callback(err, null) })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LLM — streaming (for chat)
+// ─────────────────────────────────────────────────────────────────────────────
+function streamChat(model, messages, onChunk, onDone, onError) {
+  fetch(BASE_URL + '/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + getApiKey() },
+    body: JSON.stringify({ model: model, messages: messages, max_tokens: 2048, temperature: 0.7, stream: true }),
+  }).then(function(res) {
+    if (!res.ok) { onError(new Error('HTTP ' + res.status)); return }
+    var reader = res.body.getReader()
+    var decoder = new TextDecoder()
+    var buf = '', streamBuf = '', inThought = false
+
+    function read() {
+      reader.read().then(function(result) {
+        if (result.done) { onDone(); return }
+        buf += decoder.decode(result.value, { stream: true })
+        var lines = buf.split('\n'); buf = lines.pop()
+        lines.forEach(function(line) {
+          if (!line.startsWith('data: ')) return
+          var raw = line.slice(6).trim()
+          if (raw === '[DONE]') return
+          try {
+            var delta = JSON.parse(raw).choices[0].delta.content || ''
+            if (!delta) return
+            streamBuf += delta
+            var output = ''
+            while (streamBuf.length > 0) {
+              if (!inThought) {
+                var s = streamBuf.indexOf('<thought>')
+                if (s === -1) {
+                  var lt = streamBuf.lastIndexOf('<')
+                  if (lt !== -1 && lt > streamBuf.length - 9) {
+                    output += streamBuf.slice(0, lt); streamBuf = streamBuf.slice(lt)
+                  } else { output += streamBuf; streamBuf = '' }
+                  break
+                }
+                output += streamBuf.slice(0, s); streamBuf = streamBuf.slice(s + 9); inThought = true
+              } else {
+                var e = streamBuf.indexOf('</thought>')
+                if (e === -1) { streamBuf = streamBuf.slice(Math.max(0, streamBuf.length - 10)); break }
+                streamBuf = streamBuf.slice(e + 10); inThought = false
+              }
+            }
+            if (output) onChunk(output)
+          } catch(ignored) {}
+        })
+        read()
+      }).catch(onError)
+    }
+    read()
+  }).catch(onError)
+}
+
+function stripThoughts(text) {
+  return text.replace(/<thought>[\s\S]*?<\/thought>/g, '').trim()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Memory pool scoring & retrieval
+// ─────────────────────────────────────────────────────────────────────────────
+function extractKeywords(text) {
+  return text.toLowerCase().split(/[\s,。、!?！？\n]+/).filter(function(w) { return w.length > 2 }).slice(0, 10)
+}
+
+function parseJSON(text) {
+  var clean = text.replace(/<thought>[\s\S]*?<\/thought>/g, '').replace(/```[\w]*\n?|\n?```/g, '').trim()
+  var m = clean.match(/(\{[\s\S]*\}|\[[\s\S]*\])/)
+  if (!m) throw new SyntaxError('No JSON found')
+  return JSON.parse(m[0].replace(/\\([^"\\/bfnrtu])/g, '$1'))
+}
+
+function poolScore(entry, queryEmbedding, keywords) {
+  var recency = 1 / (1 + (Date.now() - entry.lastUsed) / 60000)
+  var freq = Math.log1p(entry.useCount) * 0.5
+  var relevance
+  if (entry.embedding && queryEmbedding) {
+    relevance = cosine(entry.embedding, queryEmbedding) * 2
+  } else {
+    var kws = [entry.keyword].concat(entry.relatedKeywords || []).map(function(k) { return k.toLowerCase() })
+    relevance = keywords.some(function(k) { return kws.some(function(e) { return e.indexOf(k) !== -1 || k.indexOf(e) !== -1 }) }) ? 1.5 : 0
+  }
+  return recency + freq + relevance
+}
+
+function poolRetrieve(userMessage, queryEmbedding) {
+  var keywords = extractKeywords(userMessage)
+  var scored = memoryPool.map(function(e) { return { e: e, s: poolScore(e, queryEmbedding, keywords) } })
+  scored.sort(function(a, b) { return b.s - a.s })
+  var budget = INJECT_BUDGET
+  return scored.filter(function(item) {
+    if (budget <= 0) return false
+    item.e.lastUsed = Date.now(); item.e.useCount++
+    budget -= item.e.content.length; return true
+  }).map(function(item) { return item.e })
+}
+
+function poolUpsert(entry) {
+  var ex = null
+  for (var i = 0; i < memoryPool.length; i++) {
+    if (memoryPool[i].keyword.toLowerCase() === entry.keyword.toLowerCase()) { ex = memoryPool[i]; break }
+  }
+  if (ex) {
+    ex.content = entry.content; ex.relatedKeywords = entry.relatedKeywords
+    ex.embedding = entry.embedding; ex.lastUsed = Date.now(); ex.useCount++
+    return null
+  }
+  if (memoryPool.length >= MAX_POOL) {
+    var keywords = extractKeywords(entry.keyword)
+    var scored = memoryPool.map(function(e) { return { e: e, s: poolScore(e, null, keywords) } })
+    scored.sort(function(a, b) { return a.s - b.s })
+    var evicted = scored[0].e.keyword
+    memoryPool = memoryPool.filter(function(e) { return e.keyword !== evicted })
+    return evicted
+  }
+  memoryPool.push(entry); return null
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Compression (callback-based, no async/await for file:// compat)
+// ─────────────────────────────────────────────────────────────────────────────
+function compress(batch) {
+  if (isCompressing || !batch.length) return
+  isCompressing = true
+  emitEvent('compress_start', { turnCount: batch.length })
+  var turnText = batch.map(function(t) { return (t.role === 'user' ? 'User' : 'AI') + ': ' + t.content }).join('\n')
+
+  chatComplete(getMemModel(), [
+    { role: 'system', content: 'You are a memory compression assistant. Output JSON only, no markdown.' },
+    { role: 'user', content: 'Analyze these conversation turns. Identify key topics and keywords.\n\n' + turnText + '\n\nPRIORITY: Always extract user-stated facts first (name, role, project, goals, preferences) before summarizing AI responses.\n\nOutput JSON:\n{"strategy":"one sentence","keywords":["kw1","kw2"]}' },
+  ], function(err, stratRaw) {
+    var keywords = [], strategy = 'general compression'
+    if (!err && stratRaw) {
+      try { var p = parseJSON(stratRaw); keywords = p.keywords || []; strategy = p.strategy || strategy }
+      catch(e) { keywords = extractKeywords(turnText) }
+    } else { keywords = extractKeywords(turnText) }
+
+    chatComplete(getMemModel(), [
+      { role: 'system', content: 'You are a memory compression assistant. Output JSON only, no markdown.' },
+      { role: 'user', content: 'Strategy: ' + strategy + '\nKeywords: ' + keywords.join(', ') + '\n\nConversation:\n' + turnText + '\n\nRules:\n1. FIRST extract user-stated facts: name, identity, role, project, preferences. Store as "User stated: ...".\n2. Then summarize key topics from AI responses (max 50 words each).\n3. Only store session-specific info, not general world knowledge.\n\nOutput JSON:\n{"entries":[{"keyword":"topic","content":"summary","relatedKeywords":["rel1"]}]}' },
+    ], function(err2, compRaw) {
+      var rawEntries = []
+      if (!err2 && compRaw) {
+        try { rawEntries = parseJSON(compRaw).entries || [] } catch(e) {}
+      }
+
+      if (!rawEntries.length) {
+        emitEvent('compress_error', { error: err2 ? err2.message : 'No entries parsed' })
+        isCompressing = false
+        return
+      }
+
+      // embed all entry contents (or null if embedder not ready)
+      var texts = rawEntries.map(function(e) { return e.keyword + ': ' + e.content })
+      embedAll(texts, function(embeddings) {
+        var evictedCount = 0
+        rawEntries.forEach(function(e, i) {
+          var entry = {
+            id: crypto.randomUUID(),
+            keyword: e.keyword,
+            content: e.content,
+            relatedKeywords: e.relatedKeywords || [],
+            embedding: embeddings[i],
+            lastUsed: Date.now(),
+            useCount: 1,
+            createdAtTurn: batch[batch.length - 1].index,
+          }
+          var evicted = poolUpsert(entry)
+          if (evicted) { evictedCount++; emitEvent('pool_evict', { keyword: evicted }) }
+        })
+
+        emitEvent('compress_done', {
+          entriesAdded: rawEntries.length,
+          evicted: evictedCount,
+          poolSize: memoryPool.length,
+          withEmbedding: rawEntries.filter(function(_, i) { return embeddings[i] }).length,
+        })
+        dbSave()
+        renderPool()
+        isCompressing = false
+
+        if (pendingTurns.length >= MIN_COMPRESS) {
+          var next = pendingTurns.splice(0)
+          compress(next)
+        }
+      })
+    })
+  })
+}
+
+function addTurnToMemory(turn) {
+  pendingTurns.push(turn)
+  if (pendingTurns.length >= MIN_COMPRESS) compress(pendingTurns.splice(0))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Context building
+// ─────────────────────────────────────────────────────────────────────────────
+function buildAndSend(userMessage, asstEl, mdContainer, fullTextRef, btn, msgs) {
+  embedText(userMessage, function(queryEmbedding) {
+    var recent = turns.slice(-MAX_RAW_TURNS)
+    var memEntries = poolRetrieve(userMessage, queryEmbedding)
+    var memoryText = memEntries.map(function(e) { return '[' + e.keyword + '] ' + e.content }).join('\n')
+
+    if (memEntries.length) emitEvent('memory_inject', {
+      count: memEntries.length, poolSize: memoryPool.length, semantic: embedReady,
+    })
+
+    var messages = [{ role: 'system', content: 'You are a helpful assistant.' }]
+    recent.slice(0, -1).forEach(function(t) { messages.push({ role: t.role, content: t.content }) })
+    var userContent = memoryText ? '## Conversation Memory\n' + memoryText + '\n\n---\n\n' + userMessage : userMessage
+    messages.push({ role: 'user', content: userContent })
+
+    emitEvent('context_built', { rawTurns: recent.length, memoryEntries: memEntries.length, semantic: embedReady })
+    lastPrompt = { messages: messages, memoryText: memoryText, userMessage: userMessage }
+
+    var pBtn = document.getElementById('prompt-tab-btn')
+    if (!document.getElementById('prompt-tab').classList.contains('active')) {
+      pBtn.textContent = ''; pBtn.appendChild(document.createTextNode('Prompt '))
+      pBtn.appendChild(el('span', 'badge'))
+    }
+
+    var rafId = null
+    streamChat(getMainModel(), messages,
+      function onChunk(chunk) {
+        fullTextRef.v += chunk
+        if (!rafId) rafId = requestAnimationFrame(function() {
+          rafId = null; renderMarkdown(mdContainer, fullTextRef.v); msgs.scrollTop = 9999
+        })
+        msgs.scrollTop = 9999
+      },
+      function onDone() {
+        if (rafId) cancelAnimationFrame(rafId)
+        renderMarkdown(mdContainer, fullTextRef.v)
+        asstEl.classList.remove('typing')
+        setChatStatus('ready')
+
+        var asstTurn = { role: 'assistant', content: fullTextRef.v, index: turnIndex++ }
+        turns.push(asstTurn)
+        emitEvent('turn_assistant', { index: asstTurn.index })
+
+        var userTurn = turns[turns.length - 2]
+        addTurnToMemory(userTurn)
+        addTurnToMemory(asstTurn)
+
+        btn.disabled = false
+        document.getElementById('user-input').focus()
+        msgs.scrollTop = 9999
+      },
+      function onError(err) {
+        if (rafId) cancelAnimationFrame(rafId)
+        asstEl.classList.remove('typing')
+        mdContainer.textContent = 'Error: ' + err.message
+        setChatStatus(err.message, true)
+        emitEvent('compress_error', { error: String(err) })
+        btn.disabled = false
+      }
+    )
+  })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Markdown rendering (DOMPurify sanitized)
+// ─────────────────────────────────────────────────────────────────────────────
+function renderMarkdown(container, text) {
+  container.className = 'md-content'
+  var raw = marked.parse(text)
+  var safe = DOMPurify.sanitize(raw)
+  var tmp = el('div'); tmp.insertAdjacentHTML('afterbegin', safe)
+  container.replaceChildren.apply(container, Array.from(tmp.childNodes))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Send message
+// ─────────────────────────────────────────────────────────────────────────────
+function sendMessage() {
+  var input = document.getElementById('user-input')
+  var btn = document.getElementById('send-btn')
+  var text = input.value.trim()
+  if (!text || btn.disabled) return
+  if (!getApiKey()) { setChatStatus('No API key', true); return }
+
+  input.value = ''; input.style.height = 'auto'; btn.disabled = true
+  setChatStatus('sending…')
+
+  var userTurn = { role: 'user', content: text, index: turnIndex++ }
+  turns.push(userTurn)
+  emitEvent('turn_user', { index: userTurn.index })
+
+  var msgs = document.getElementById('messages')
+  var userEl = el('div', 'msg user'); userEl.textContent = text; msgs.appendChild(userEl)
+
+  var asstEl = el('div', 'msg assistant typing')
+  var mdContainer = el('div'); asstEl.appendChild(mdContainer); msgs.appendChild(asstEl)
+  msgs.scrollTop = 9999
+
+  var fullTextRef = { v: '' }
+  buildAndSend(text, asstEl, mdContainer, fullTextRef, btn, msgs)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pool tab
+// ─────────────────────────────────────────────────────────────────────────────
+function renderPool() {
+  var list = document.getElementById('pool-list')
+  var withEmb = memoryPool.filter(function(e) { return e.embedding }).length
+  txt(document.getElementById('pool-count'), memoryPool.length + ' entries | ' + withEmb + ' with embedding')
+  list.textContent = ''
+  var sorted = memoryPool.slice().sort(function(a, b) { return b.lastUsed - a.lastUsed })
+  sorted.forEach(function(entry) {
+    var div = el('div', 'pool-entry')
+    var kwRow = el('div', 'kw'); kwRow.textContent = entry.keyword
+    if (entry.embedding) { app(kwRow, txt(el('span', 'emb-badge'), '\u2295 embed')) }
+    app(div, kwRow)
+    app(div, txt(el('div', 'content'), entry.content))
+    var meta = el('div', 'meta')
+    app(meta, txt(el('span'), 'used\u00d7' + entry.useCount))
+    app(meta, txt(el('span'), 'turn #' + entry.createdAtTurn))
+    app(meta, txt(el('span'), new Date(entry.lastUsed).toLocaleTimeString()))
+    div.appendChild(meta)
+    if (entry.relatedKeywords && entry.relatedKeywords.length)
+      app(div, txt(el('div', 'related'), 'related: ' + entry.relatedKeywords.join(', ')))
+    list.appendChild(div)
+  })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Prompt tab
+// ─────────────────────────────────────────────────────────────────────────────
+function renderPrompt() {
+  if (!lastPrompt) return
+  var messages = lastPrompt.messages
+  var memoryText = lastPrompt.memoryText
+  var userMessage = lastPrompt.userMessage
+  var display = document.getElementById('prompt-display')
+  display.textContent = ''
+  txt(document.getElementById('context-info'),
+    messages.length + ' messages | ' + memoryPool.length + ' in pool | ' + (embedReady ? 'semantic' : 'keyword') + ' retrieval')
+
+  messages.forEach(function(m, i) {
+    var isLastUser = m.role === 'user' && i === messages.length - 1
+    var div = el('div', 'prompt-msg ' + (m.role === 'system' ? 'system' : m.role === 'user' ? 'user-msg' : 'assistant-msg'))
+    var label = el('div', 'role-label')
+    if (m.role === 'system') {
+      label.classList.add('sys'); label.textContent = 'SYSTEM '
+      app(label, txt(el('span', 'stable-note'), '(stable — KV cache friendly)'))
+    } else if (m.role === 'user') {
+      label.classList.add('usr'); label.textContent = isLastUser && memoryText ? 'USER (current)' : 'USER'
+    } else {
+      label.classList.add('ast'); label.textContent = 'ASSISTANT'
+    }
+    div.appendChild(label)
+    if (isLastUser && memoryText) {
+      var block = el('div', 'memory-block')
+      app(block, txt(el('div', 'mem-header'), '\u25bc MEMORY FROM POOL  [' + (embedReady ? 'semantic' : 'keyword') + ']'))
+      app(block, txt(el('div', 'mem-content'), memoryText))
+      div.appendChild(block)
+    }
+    app(div, txt(el('div', 'text-content'), isLastUser && memoryText ? userMessage : m.content))
+    display.appendChild(div)
+  })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Init
+// ─────────────────────────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', function() {
+  var saved = localStorage.getItem('gemini-api-key')
+  if (saved) document.getElementById('api-key-input').value = saved
+
+  document.querySelectorAll('nav button').forEach(function(btn) {
+    btn.addEventListener('click', function() { switchTab(btn) })
+  })
+  document.getElementById('send-btn').addEventListener('click', sendMessage)
+  document.getElementById('api-key-input').addEventListener('change', function() {
+    localStorage.setItem('gemini-api-key', document.getElementById('api-key-input').value.trim())
+  })
+
+  var textarea = document.getElementById('user-input')
+  textarea.addEventListener('input', function() {
+    textarea.style.height = 'auto'; textarea.style.height = textarea.scrollHeight + 'px'
+  })
+  textarea.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage() }
+  })
+
+  initDB(function() {
+    dbLoad(function() {
+      setChatStatus('ready')
+    })
+  })
+
+  // Embedding loads in background — chat is usable immediately
+  initEmbedder()
+})
+</script>
+</body>
+</html>

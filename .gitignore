@@ -1,0 +1,22 @@
+# Environment
+.env
+*.env.local
+
+# Pool persistence
+pool.json
+demo-pool.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+dist/
+*.egg-info/
+.pytest_cache/
+
+# Bun / Node
+node_modules/
+bun.lockb
+
+# macOS
+.DS_Store
