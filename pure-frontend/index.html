@@ -91,6 +91,9 @@ nav button.active { color: #e0e0e0; border-bottom-color: #7c3aed; }
 .role-label.usr { color: #42a5f5; }
 .role-label.ast { color: #7e57c2; }
 .stable-note { color: #555; font-size: 11px; font-weight: normal; }
+#mic-btn { background: #1a1a2e; border: 1px solid #333; color: #aaa; padding: 6px 10px; border-radius: 4px; cursor: pointer; font-size: 16px; transition: all 0.1s; }
+#mic-btn.recording { background: #7f1d1d; border-color: #ef4444; color: #fff; animation: pulse 1s infinite; }
+@keyframes pulse { 0%,100% { opacity:1 } 50% { opacity:0.6 } }
 .memory-block { background: #2a1a3a; border-left: 3px solid #7c3aed; padding: 6px 10px; margin-bottom: 8px; border-radius: 0 4px 4px 0; }
 .mem-header { color: #7c3aed; font-size: 11px; font-weight: bold; margin-bottom: 4px; }
 .mem-content { color: #b39ddb; font-size: 11px; white-space: pre-wrap; }
@@ -106,6 +109,8 @@ nav button.active { color: #e0e0e0; border-bottom-color: #7c3aed; }
     <input id="api-key-input" type="password" placeholder="Gemini API Key" />
     <input id="model-input" type="text" value="gemma-4-31b-it" placeholder="Main model" />
     <input id="mem-model-input" type="text" value="gemma-4-26b-a4b-it" placeholder="Memory model" />
+    <input id="vlm-url-input" type="text" placeholder="VLM URL (audio/vision)" style="width:220px" />
+    <input id="vlm-model-input" type="text" value="gemma-4-e4b-it-8bit" placeholder="VLM model" />
   </div>
   <span id="embed-status">embed: init…</span>
   <span id="chat-status">ready</span>
@@ -122,6 +127,7 @@ nav button.active { color: #e0e0e0; border-bottom-color: #7c3aed; }
   <div id="messages"></div>
   <div id="input-row">
     <textarea id="user-input" rows="1" placeholder="Type a message… (Shift+Enter for newline)"></textarea>
+    <button id="mic-btn" title="Hold to record voice">🎤</button>
     <button id="send-btn">Send</button>
   </div>
 </div>
@@ -296,6 +302,12 @@ function getApiKey() {
 }
 function getMainModel() { return document.getElementById('model-input').value.trim() || 'gemma-4-31b-it' }
 function getMemModel() { return document.getElementById('mem-model-input').value.trim() || 'gemma-4-26b-a4b-it' }
+function getVlmUrl() {
+  var v = document.getElementById('vlm-url-input').value.trim()
+  if (v) localStorage.setItem('vlm-url', v)
+  return v || localStorage.getItem('vlm-url') || ''
+}
+function getVlmModel() { return document.getElementById('vlm-model-input').value.trim() || 'gemma-4-e4b-it-8bit' }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // LLM — non-streaming (for compression)
@@ -743,6 +755,90 @@ document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('api-key-input').addEventListener('change', function() {
     localStorage.setItem('gemini-api-key', document.getElementById('api-key-input').value.trim())
   })
+  document.getElementById('vlm-url-input').addEventListener('change', function() {
+    localStorage.setItem('vlm-url', document.getElementById('vlm-url-input').value.trim())
+  })
+
+  // Restore VLM URL from localStorage
+  var savedVlmUrl = localStorage.getItem('vlm-url')
+  if (savedVlmUrl) document.getElementById('vlm-url-input').value = savedVlmUrl
+
+  // ── Voice input ───────────────────────────────────────────────────────────
+  var mediaRecorder = null, audioChunks = [], isRecording = false
+  var micBtn = document.getElementById('mic-btn')
+
+  function startRecording() {
+    if (!navigator.mediaDevices) { alert('Microphone not available (requires HTTPS or localhost)'); return }
+    navigator.mediaDevices.getUserMedia({ audio: true }).then(function(stream) {
+      audioChunks = []
+      mediaRecorder = new MediaRecorder(stream)
+      mediaRecorder.ondataavailable = function(e) { if (e.data.size > 0) audioChunks.push(e.data) }
+      mediaRecorder.onstop = function() {
+        stream.getTracks().forEach(function(t) { t.stop() })
+        var blob = new Blob(audioChunks, { type: 'audio/webm' })
+        var reader = new FileReader()
+        reader.onloadend = function() {
+          var base64 = reader.result.split(',')[1]
+          sendAudioMessage(base64, 'webm')
+        }
+        reader.readAsDataURL(blob)
+      }
+      mediaRecorder.start()
+      isRecording = true
+      micBtn.classList.add('recording')
+      micBtn.textContent = '⏹'
+    }).catch(function(err) { alert('Mic error: ' + err.message) })
+  }
+
+  function stopRecording() {
+    if (mediaRecorder && isRecording) {
+      mediaRecorder.stop()
+      isRecording = false
+      micBtn.classList.remove('recording')
+      micBtn.textContent = '🎤'
+    }
+  }
+
+  micBtn.addEventListener('click', function() {
+    if (isRecording) stopRecording()
+    else startRecording()
+  })
+
+  function sendAudioMessage(base64Audio, format) {
+    var vlmUrl = getVlmUrl()
+    if (!vlmUrl) { alert('Please set VLM URL in settings'); return }
+    var vlmModel = getVlmModel()
+    setChatStatus('transcribing…')
+
+    var messages = [{
+      role: 'user',
+      content: [{
+        type: 'input_audio',
+        input_audio: { data: base64Audio, format: format }
+      }]
+    }]
+
+    fetch(vlmUrl.replace(/\/$/, '') + '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + getApiKey() },
+      body: JSON.stringify({ model: vlmModel, messages: messages, max_tokens: 512 })
+    }).then(function(r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status)
+      return r.json()
+    }).then(function(data) {
+      var transcript = data.choices[0].message.content || ''
+      if (!transcript.trim()) { setChatStatus('ready'); return }
+      // Put transcript into textarea and send
+      var textarea = document.getElementById('user-input')
+      textarea.value = transcript
+      textarea.style.height = 'auto'
+      textarea.style.height = textarea.scrollHeight + 'px'
+      setChatStatus('ready')
+      sendMessage()
+    }).catch(function(err) {
+      setChatStatus('audio error: ' + err.message)
+    })
+  }
 
   var textarea = document.getElementById('user-input')
   textarea.addEventListener('input', function() {
