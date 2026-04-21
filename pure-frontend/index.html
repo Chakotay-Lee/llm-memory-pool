@@ -109,8 +109,8 @@ nav button.active { color: #e0e0e0; border-bottom-color: #7c3aed; }
     <input id="api-key-input" type="password" placeholder="Gemini API Key" />
     <input id="model-input" type="text" value="gemma-4-31b-it" placeholder="Main model" />
     <input id="mem-model-input" type="text" value="gemma-4-26b-a4b-it" placeholder="Memory model" />
-    <input id="vlm-url-input" type="text" placeholder="VLM URL (audio/vision)" style="width:220px" />
-    <input id="vlm-model-input" type="text" value="gemma-4-e4b-it-8bit" placeholder="VLM model" />
+    <input id="vlm-url-input" type="text" placeholder="VLM URL e.g. https://mlx-vlm.example.com" style="width:260px" />
+    <input id="vlm-model-input" type="text" placeholder="VLM model (full path or repo ID)" style="width:220px" />
   </div>
   <span id="embed-status">embed: init…</span>
   <span id="chat-status">ready</span>
@@ -307,7 +307,12 @@ function getVlmUrl() {
   if (v) localStorage.setItem('vlm-url', v)
   return v || localStorage.getItem('vlm-url') || ''
 }
-function getVlmModel() { return document.getElementById('vlm-model-input').value.trim() || 'gemma-4-e4b-it-8bit' }
+function getVlmModel() { return document.getElementById('vlm-model-input').value.trim() }
+function saveVlmModel() {
+  var v = document.getElementById('vlm-model-input').value.trim()
+  if (v) localStorage.setItem('vlm-model', v)
+  return v
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // LLM — non-streaming (for compression)
@@ -758,10 +763,15 @@ document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('vlm-url-input').addEventListener('change', function() {
     localStorage.setItem('vlm-url', document.getElementById('vlm-url-input').value.trim())
   })
+  document.getElementById('vlm-model-input').addEventListener('change', function() {
+    localStorage.setItem('vlm-model', document.getElementById('vlm-model-input').value.trim())
+  })
 
-  // Restore VLM URL from localStorage
+  // Restore VLM settings from localStorage
   var savedVlmUrl = localStorage.getItem('vlm-url')
   if (savedVlmUrl) document.getElementById('vlm-url-input').value = savedVlmUrl
+  var savedVlmModel = localStorage.getItem('vlm-model')
+  if (savedVlmModel) document.getElementById('vlm-model-input').value = savedVlmModel
 
   // ── Voice input ───────────────────────────────────────────────────────────
   var mediaRecorder = null, audioChunks = [], isRecording = false
@@ -808,6 +818,7 @@ document.addEventListener('DOMContentLoaded', function() {
     var vlmUrl = getVlmUrl()
     if (!vlmUrl) { alert('Please set VLM URL in settings'); return }
     var vlmModel = getVlmModel()
+    if (!vlmModel) { alert('Please set VLM model name in settings'); return }
     setChatStatus('transcribing…')
 
     var messages = [{
