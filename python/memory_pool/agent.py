@@ -24,7 +24,9 @@ class MemoryAgent:
         base_url: str = BASE_URL,
         max_raw_turns: int = 4,
         min_turns_to_compress: int = 2,
-        max_pool_entries: int = 100,
+        max_pool_entries: int = 1000,
+        context_window: int | None = None,
+        pool_ratio: float = 0.15,
         inject_budget: int = 800,
         pool_file: str | None = None,
         on_event: Callable[[str, dict], None] | None = None,
@@ -39,7 +41,11 @@ class MemoryAgent:
             api_key=api_key or os.environ.get("GEMINI_API_KEY", ""),
             base_url=base_url,
         )
-        self.pool = MemoryPool(max_pool_entries)
+        self.pool = MemoryPool(
+            max_entries=max_pool_entries,
+            context_window=context_window,
+            pool_ratio=pool_ratio,
+        )
         self.worker = MemoryWorker(
             pool=self.pool,
             client=self.client,

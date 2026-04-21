@@ -48,11 +48,9 @@ class MemoryWorker:
             self._spawn(self._compress(batch))
 
     async def get_memory(self, user_message: str, budget: int = 800) -> list[MemoryEntry]:
-        keywords = extract_keywords(user_message)
-        entries = self.pool.retrieve(keywords, budget)
+        entries = self.pool.retrieve(user_message, budget)
         self.on_event("memory_inject", {
             "count": len(entries),
-            "keywords": keywords,
             "poolSize": self.pool.size,
         })
         return entries
@@ -84,7 +82,7 @@ class MemoryWorker:
                 keywords = strat.get("keywords", [])
                 strategy = strat.get("strategy", "general compression")
             except Exception:
-                keywords = extract_keywords(turn_text)
+                keywords = []
                 strategy = "general compression"
 
             comp_raw = await chat_complete(self.client, self.memory_model, [
