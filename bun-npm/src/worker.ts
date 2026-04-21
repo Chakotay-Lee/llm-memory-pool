@@ -28,9 +28,8 @@ export class MemoryWorker {
   }
 
   getMemory(userMessage: string, budget = 800): MemoryEntry[] {
-    const keywords = extractKeywords(userMessage)
-    const entries = this.pool.retrieve(keywords, budget)
-    this.emit({ kind: 'memory_inject', ts: Date.now(), data: { count: entries.length, keywords, poolSize: this.pool.size } })
+    const entries = this.pool.retrieve(userMessage, budget)
+    this.emit({ kind: 'memory_inject', ts: Date.now(), data: { count: entries.length, poolSize: this.pool.size } })
     return entries
   }
 
@@ -54,7 +53,7 @@ export class MemoryWorker {
         keywords = parsed.keywords ?? []
         strategy = parsed.strategy ?? strategy
       } catch {
-        keywords = extractKeywords(turnText)
+        keywords = []
       }
 
       const compRaw = await chatComplete(this.client, this.memoryModel, [

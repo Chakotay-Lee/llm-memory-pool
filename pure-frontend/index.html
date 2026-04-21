@@ -136,14 +136,16 @@ nav button.active { color: #e0e0e0; border-bottom-color: #7c3aed; }
 var BASE_URL      = 'https://generativelanguage.googleapis.com/v1beta/openai'
 var MAX_RAW_TURNS = 4
 var MIN_COMPRESS  = 2
-var MAX_POOL      = 100
+var MAX_POOL      = 1000
 var INJECT_BUDGET = 800
+var USE_COUNT_SHRINK_THRESHOLD = 10000
 
 // ─────────────────────────────────────────────────────────────────────────────
 // State
 // ─────────────────────────────────────────────────────────────────────────────
 var turns = [], turnIndex = 0
 var memoryPool = [], pendingTurns = [], isCompressing = false
+var poolIndex = {}   // keyword token → [entry.id, ...]
 var lastPrompt = null
 var db = null
 var useModel = null, embedReady = false
@@ -274,6 +276,8 @@ function dbLoad(callback) {
   var req = db.transaction('pool', 'readonly').objectStore('pool').getAll()
   req.onsuccess = function() {
     memoryPool = req.result || []
+    poolIndex = {}
+    memoryPool.forEach(function(e) { indexEntry(e) })
     var withEmb = memoryPool.filter(function(e) { return e.embedding }).length
     emitEvent('pool_state', { restored: memoryPool.length, withEmbedding: withEmb, source: 'IndexedDB' })
     renderPool()
@@ -371,10 +375,6 @@ function stripThoughts(text) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Memory pool scoring & retrieval
 // ─────────────────────────────────────────────────────────────────────────────
-function extractKeywords(text) {
-  return text.toLowerCase().split(/[\s,。、!?！？\n]+/).filter(function(w) { return w.length > 2 }).slice(0, 10)
-}
-
 function parseJSON(text) {
   var clean = text.replace(/<thought>[\s\S]*?<\/thought>/g, '').replace(/```[\w]*\n?|\n?```/g, '').trim()
   var m = clean.match(/(\{[\s\S]*\}|\[[\s\S]*\])/)
@@ -382,28 +382,77 @@ function parseJSON(text) {
   return JSON.parse(m[0].replace(/\\([^"\\/bfnrtu])/g, '$1'))
 }
 
-function poolScore(entry, queryEmbedding, keywords) {
-  var recency = 1 / (1 + (Date.now() - entry.lastUsed) / 60000)
-  var freq = Math.log1p(entry.useCount) * 0.5
+function tokenize(text) {
+  return text.toLowerCase().split(/[\s\-_,。、!?！？\n]+/).filter(function(w) { return w.length > 1 })
+}
+
+function indexEntry(entry) {
+  var kws = [entry.keyword].concat(entry.relatedKeywords || [])
+  kws.forEach(function(kw) {
+    tokenize(kw).forEach(function(token) {
+      if (!poolIndex[token]) poolIndex[token] = []
+      if (poolIndex[token].indexOf(entry.id) === -1) poolIndex[token].push(entry.id)
+    })
+  })
+}
+
+function deindexEntry(entry) {
+  var kws = [entry.keyword].concat(entry.relatedKeywords || [])
+  kws.forEach(function(kw) {
+    tokenize(kw).forEach(function(token) {
+      if (poolIndex[token]) {
+        poolIndex[token] = poolIndex[token].filter(function(id) { return id !== entry.id })
+        if (!poolIndex[token].length) delete poolIndex[token]
+      }
+    })
+  })
+}
+
+function poolScore(entry, queryLower, queryEmbedding, total, maxUc) {
+  var recency = entry.useCount / (total || 1)
+  var freq = Math.log1p(entry.useCount) / Math.log1p(maxUc || 1)
   var relevance
   if (entry.embedding && queryEmbedding) {
     relevance = cosine(entry.embedding, queryEmbedding) * 2
   } else {
     var kws = [entry.keyword].concat(entry.relatedKeywords || []).map(function(k) { return k.toLowerCase() })
-    relevance = keywords.some(function(k) { return kws.some(function(e) { return e.indexOf(k) !== -1 || k.indexOf(e) !== -1 }) }) ? 1.5 : 0
+    relevance = kws.some(function(kw) { return queryLower.indexOf(kw) !== -1 }) ? 2 : 0
   }
   return recency + freq + relevance
 }
 
+function shrinkCounts() {
+  if (memoryPool.some(function(e) { return e.useCount > USE_COUNT_SHRINK_THRESHOLD })) {
+    memoryPool.forEach(function(e) { e.useCount = Math.max(1, Math.floor(e.useCount / 2)) })
+  }
+}
+
 function poolRetrieve(userMessage, queryEmbedding) {
-  var keywords = extractKeywords(userMessage)
-  var scored = memoryPool.map(function(e) { return { e: e, s: poolScore(e, queryEmbedding, keywords) } })
+  if (!memoryPool.length) return []
+  var queryLower = userMessage.toLowerCase()
+  var total = memoryPool.reduce(function(s, e) { return s + e.useCount }, 0)
+  var maxUc = memoryPool.reduce(function(m, e) { return Math.max(m, e.useCount) }, 1)
+
+  // Inverted index → candidate IDs
+  var candidateIds = {}
+  tokenize(queryLower).forEach(function(token) {
+    if (poolIndex[token]) poolIndex[token].forEach(function(id) { candidateIds[id] = true })
+  })
+  var candidates = Object.keys(candidateIds).length
+    ? memoryPool.filter(function(e) { return candidateIds[e.id] })
+    : memoryPool
+
+  var scored = candidates.map(function(e) {
+    return { e: e, s: poolScore(e, queryLower, queryEmbedding, total, maxUc) }
+  })
   scored.sort(function(a, b) { return b.s - a.s })
+
   var budget = INJECT_BUDGET
   return scored.filter(function(item) {
     if (budget <= 0) return false
-    item.e.lastUsed = Date.now(); item.e.useCount++
-    budget -= item.e.content.length; return true
+    item.e.useCount++
+    budget -= item.e.content.length
+    return true
   }).map(function(item) { return item.e })
 }
 
@@ -413,19 +462,26 @@ function poolUpsert(entry) {
     if (memoryPool[i].keyword.toLowerCase() === entry.keyword.toLowerCase()) { ex = memoryPool[i]; break }
   }
   if (ex) {
+    deindexEntry(ex)
     ex.content = entry.content; ex.relatedKeywords = entry.relatedKeywords
-    ex.embedding = entry.embedding; ex.lastUsed = Date.now(); ex.useCount++
+    ex.embedding = entry.embedding; ex.useCount++
+    indexEntry(ex)
     return null
   }
   if (memoryPool.length >= MAX_POOL) {
-    var keywords = extractKeywords(entry.keyword)
-    var scored = memoryPool.map(function(e) { return { e: e, s: poolScore(e, null, keywords) } })
+    shrinkCounts()
+    var total = memoryPool.reduce(function(s, e) { return s + e.useCount }, 0)
+    var maxUc = memoryPool.reduce(function(m, e) { return Math.max(m, e.useCount) }, 1)
+    var scored = memoryPool.map(function(e) { return { e: e, s: poolScore(e, '', null, total, maxUc) } })
     scored.sort(function(a, b) { return a.s - b.s })
-    var evicted = scored[0].e.keyword
-    memoryPool = memoryPool.filter(function(e) { return e.keyword !== evicted })
-    return evicted
+    var evicted = scored[0].e
+    deindexEntry(evicted)
+    memoryPool = memoryPool.filter(function(e) { return e !== evicted })
+    return evicted.keyword
   }
-  memoryPool.push(entry); return null
+  memoryPool.push(entry)
+  indexEntry(entry)
+  return null
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -444,8 +500,8 @@ function compress(batch) {
     var keywords = [], strategy = 'general compression'
     if (!err && stratRaw) {
       try { var p = parseJSON(stratRaw); keywords = p.keywords || []; strategy = p.strategy || strategy }
-      catch(e) { keywords = extractKeywords(turnText) }
-    } else { keywords = extractKeywords(turnText) }
+      catch(e) { keywords = [] }
+    } else { keywords = [] }
 
     chatComplete(getMemModel(), [
       { role: 'system', content: 'You are a memory compression assistant. Output JSON only, no markdown.' },

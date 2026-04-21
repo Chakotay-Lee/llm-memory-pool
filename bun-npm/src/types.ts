@@ -34,6 +34,8 @@ export interface MemoryAgentOptions {
   maxRawTurns?: number
   minTurnsToCompress?: number
   maxPoolEntries?: number
+  contextWindow?: number
+  poolRatio?: number
   injectBudget?: number
   poolFile?: string
   onEvent?: (event: AppEvent) => void

@@ -33,7 +33,11 @@ export class MemoryAgent {
       baseURL: options.baseURL ?? DEFAULT_BASE_URL,
     })
 
-    this.pool = new MemoryPool(options.maxPoolEntries ?? 100)
+    this.pool = new MemoryPool({
+      maxEntries: options.maxPoolEntries ?? 1000,
+      contextWindow: options.contextWindow,
+      poolRatio: options.poolRatio,
+    })
     this.worker = new MemoryWorker(
       this.pool,
       this.client,
