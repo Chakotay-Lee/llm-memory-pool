@@ -865,13 +865,19 @@ document.addEventListener('DOMContentLoaded', function() {
     if (!vlmModel) { alert('Please set VLM model name in settings'); return }
     setChatStatus('transcribing…')
 
-    var messages = [{
-      role: 'user',
-      content: [{
-        type: 'input_audio',
-        input_audio: { data: base64Audio, format: format }
-      }]
-    }]
+    var messages = [
+      {
+        role: 'system',
+        content: 'Transcribe the audio exactly as spoken. Output only the transcription text. Do not respond, comment, or add anything else.'
+      },
+      {
+        role: 'user',
+        content: [{
+          type: 'input_audio',
+          input_audio: { data: base64Audio, format: format }
+        }]
+      }
+    ]
 
     fetch(vlmUrl.replace(/\/$/, '') + '/v1/chat/completions', {
       method: 'POST',
